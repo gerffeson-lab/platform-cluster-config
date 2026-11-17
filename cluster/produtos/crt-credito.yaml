@@ -1,0 +1,177 @@
+# Onboarding do produto crt/credito. Um arquivo por produto, gerado a partir do catálogo
+# do self-service (catalogo/siglas.yaml) quando o produto entra por PR.
+#
+# Na POC os três ambientes ficam no mesmo cluster, um namespace por ambiente. No banco,
+# cada cluster tem só o(s) ambiente(s) dele: muda a lista de ambientes no ApplicationSet.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crt-credito-dev
+  labels:
+    plataforma.acme/sigla: crt
+    plataforma.acme/produto: crt-credito
+    plataforma.acme/ambiente: dev
+    # equivalente ao SCC restricted-v2 do OpenShift: sem root, sem privilégios
+    pod-security.kubernetes.io/enforce: restricted
+---
+# rede de segurança no nível do pod: default para quem não declarar e teto por container
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: padrao
+  namespace: crt-credito-dev
+spec:
+  limits:
+    - type: Container
+      defaultRequest: {cpu: 100m, memory: 256Mi}
+      default: {cpu: 500m, memory: 512Mi}
+      max: {cpu: "2", memory: 4Gi}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: produto
+  namespace: crt-credito-dev
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crt-credito-hml
+  labels:
+    plataforma.acme/sigla: crt
+    plataforma.acme/produto: crt-credito
+    plataforma.acme/ambiente: hml
+    # equivalente ao SCC restricted-v2 do OpenShift: sem root, sem privilégios
+    pod-security.kubernetes.io/enforce: restricted
+---
+# rede de segurança no nível do pod: default para quem não declarar e teto por container
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: padrao
+  namespace: crt-credito-hml
+spec:
+  limits:
+    - type: Container
+      defaultRequest: {cpu: 100m, memory: 256Mi}
+      default: {cpu: 500m, memory: 512Mi}
+      max: {cpu: "2", memory: 4Gi}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: produto
+  namespace: crt-credito-hml
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crt-credito-prd
+  labels:
+    plataforma.acme/sigla: crt
+    plataforma.acme/produto: crt-credito
+    plataforma.acme/ambiente: prd
+    # equivalente ao SCC restricted-v2 do OpenShift: sem root, sem privilégios
+    pod-security.kubernetes.io/enforce: restricted
+---
+# rede de segurança no nível do pod: default para quem não declarar e teto por container
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: padrao
+  namespace: crt-credito-prd
+spec:
+  limits:
+    - type: Container
+      defaultRequest: {cpu: 100m, memory: 256Mi}
+      default: {cpu: 500m, memory: 512Mi}
+      max: {cpu: "2", memory: 4Gi}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: produto
+  namespace: crt-credito-prd
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+---
+# o que o produto pode implantar: só nos namespaces dele, só recursos de namespace,
+# e sem mexer em quota/limites que a plataforma definiu
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: crt-credito
+  namespace: argocd
+spec:
+  description: Produto crt/credito
+  sourceRepos:
+    - https://github.com/gerffeson-lab/platform-gitops.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: crt-credito-*
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - {group: "", kind: ResourceQuota}
+    - {group: "", kind: LimitRange}
+---
+# Descobre os serviços sozinho. Para cada ambiente, lê a branch dele no repo de manifestos
+# (develop = dev, release = hml, main = prd) e cria uma Application por pasta
+# manifests/crt-credito/<serviço>. O self-service e o time não criam Application nenhuma.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: crt-credito
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - matrix:
+        generators:
+          - list:
+              elements:
+                - {env: dev, branch: develop}
+                - {env: hml, branch: release}
+                - {env: prd, branch: main}
+          - git:
+              repoURL: https://github.com/gerffeson-lab/platform-gitops.git
+              revision: '{{ .branch }}'
+              directories:
+                - path: manifests/crt-credito/*
+  # pasta que some (erro na esteira, por exemplo) não apaga a Application nem o que roda;
+  # descomissionar um serviço é um passo explícito
+  syncPolicy:
+    applicationsSync: create-update
+  template:
+    metadata:
+      name: '{{ .path.basename }}-{{ .env }}'
+      labels:
+        plataforma.acme/produto: crt-credito
+        plataforma.acme/ambiente: '{{ .env }}'
+    spec:
+      project: crt-credito
+      source:
+        repoURL: https://github.com/gerffeson-lab/platform-gitops.git
+        targetRevision: '{{ .branch }}'
+        path: '{{ .path.path }}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'crt-credito-{{ .env }}'
+      syncPolicy:
+        automated: {prune: true, selfHeal: true}
